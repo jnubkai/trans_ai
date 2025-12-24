@@ -1,6 +1,7 @@
 streamlit
 requests
 langchain
+langchain-core
 langchain-community
 langchain-google-genai
 assemblyai
