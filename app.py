@@ -28,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# 2. 자격 증명
+# 2. 자격 증명 (Secrets 연동)
 try:
     CRED = st.secrets["credentials"]
     SYNO_ID = CRED["SYNO_ID"]
@@ -37,10 +37,10 @@ try:
     GOOGLE_API_KEY = CRED["GEMINI_KEY"]
     ASSEMBLY_KEY = CRED["ASSEMBLY_KEY"]
 except:
-    st.error("Secrets 설정 확인 필요")
+    st.error("Secrets 설정 확인 필요 (GEMINI_KEY, ASSEMBLY_KEY 등)")
     st.stop()
 
-# 3. AI 모델
+# 3. AI 모델 (Gemini-1.5-Flash)
 @st.cache_resource
 def init_llm():
     try:
@@ -55,10 +55,11 @@ if 'en_text_list' not in st.session_state: st.session_state['en_text_list'] = []
 if 'ko_text_list' not in st.session_state: st.session_state['ko_text_list'] = []
 if 'folder_list' not in st.session_state: st.session_state['folder_list'] = []
 if 'audio_queue' not in st.session_state: st.session_state['audio_queue'] = queue.Queue()
+if 'stt_active' not in st.session_state: st.session_state['stt_active'] = False
 
 st.title("🎤 AI 실시간 자동 통역 시스템")
 
-# 5. 사이드바 (NAS 연동)
+# 5. 사이드바 (NAS 연동 및 기록 관리)
 with st.sidebar:
     st.header("⚙️ NAS & System")
     use_ssl_verify = st.checkbox("SSL 인증서 검증", value=False)
@@ -81,108 +82,116 @@ with st.sidebar:
         st.session_state['en_text_list'], st.session_state['ko_text_list'] = [], []
         st.rerun()
 
-# 6. 통역 결과 레이아웃
+# 6. 통역 결과 레이아웃 (실시간 업데이트 영역)
 col1, col2 = st.columns(2)
-full_en = "\n\n".join(st.session_state['en_text_list'])
-full_ko = "\n\n".join(st.session_state['ko_text_list'])
+en_area = col1.empty()
+ko_area = col2.empty()
 
-with col1:
-    st.markdown("### 🇬🇧 English")
-    st.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "Waiting for voice..."}</div>', unsafe_allow_html=True)
+def update_ui():
+    full_en = "\n\n".join(st.session_state['en_text_list'])
+    full_ko = "\n\n".join(st.session_state['ko_text_list'])
+    en_area.markdown(f'### 🇬🇧 English\n<div class="stInfo transcript-box">{full_en if full_en else "Listening..."}</div>', unsafe_allow_html=True)
+    ko_area.markdown(f'### 🇰🇷 한국어\n<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
 
-with col2:
-    st.markdown("### 🇰🇷 한국어")
-    st.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
+update_ui()
 
-# 7. 오디오 프로세서 (데이터 규격화)
+# 7. 오디오 프로세서 (데이터 정규화 및 큐잉)
 class AudioProcessor(AudioProcessorBase):
     def recv(self, frame):
+        # 마이크 프레임을 넘파이 배열로 변환
         audio = frame.to_ndarray()
+        # 스테레오 -> 모노
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
-        # int16 형식으로 변환하여 큐에 삽입
-        audio_int16 = (audio * 32767).astype(np.int16)
-        st.session_state['audio_queue'].put(audio_int16.tobytes())
+        # float32 또는 int32 데이터를 int16(16bit PCM)으로 정규화
+        if audio.dtype != np.int16:
+            audio = (audio * 32767).astype(np.int16)
+        
+        # 바이너리 데이터를 큐에 삽입
+        st.session_state['audio_queue'].put(audio.tobytes())
         return frame
 
-# 8. 실시간 통역 엔진 (AssemblyAI + Gemini)
-async def run_stt_engine():
+# 8. 실시간 통역 엔진 (WebSocket)
+async def translate_engine():
     auth_header = {"Authorization": ASSEMBLY_KEY}
-    # 브라우저와 네트워크 환경에 따라 샘플 레이트를 16000으로 강제하여 부하 감소 시도
+    # 브라우저 기본 샘플 레이트가 높으므로 서버 설정을 44100Hz로 시도 (연결 실패 시 16000으로 강제 조정됨)
     url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000"
     
     try:
         async with websockets.connect(url, extra_headers=auth_header) as ws:
+            # 첫 번째 수신 메시지는 연결 승인 메시지임
             await ws.recv()
 
-            async def send_audio():
+            async def send_audio_task():
                 while True:
                     try:
-                        data = st.session_state['audio_queue'].get(timeout=0.1)
-                        await ws.send(json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")}))
+                        # 큐에서 데이터를 비차단 방식으로 가져와 전송
+                        data = st.session_state['audio_queue'].get_nowait()
+                        msg = json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")})
+                        await ws.send(msg)
                     except queue.Empty:
                         await asyncio.sleep(0.01)
-                    except:
+                    except Exception:
                         break
 
-            async def receive_text():
+            async def receive_text_task():
                 while True:
                     try:
-                        msg = await ws.recv()
-                        res = json.loads(msg)
-                        if res.get("message_type") == "FinalTranscript" and res.get("text"):
-                            raw_text = res["text"]
-                            en_res = llm.invoke([HumanMessage(content=f"Convert to formal English lecture transcript: {raw_text}")]).content
-                            ko_res = llm.invoke([HumanMessage(content=f"Translate to natural Korean lecture tone: {raw_text}")]).content
+                        result_msg = await ws.recv()
+                        result = json.loads(result_msg)
+                        
+                        # 최종 문장(FinalTranscript)만 캡처하여 Gemini로 전송
+                        if result.get("message_type") == "FinalTranscript" and result.get("text"):
+                            text = result["text"]
+                            
+                            # Gemini 통역 (속도를 위해 짧은 지침 사용)
+                            en_res = llm.invoke([HumanMessage(content=f"Fix as formal English: {text}")]).content
+                            ko_res = llm.invoke([HumanMessage(content=f"Translate to Korean lecture tone: {text}")]).content
                             
                             st.session_state['en_text_list'].append(en_res)
                             st.session_state['ko_text_list'].append(ko_res)
+                            # UI 즉시 반영 트리거
                             st.rerun()
-                    except:
+                    except Exception:
                         break
 
-            await asyncio.gather(send_audio(), receive_text())
+            await asyncio.gather(send_audio_task(), receive_text_task())
     except Exception as e:
-        print(f"Engine Error: {e}")
+        print(f"Engine Connection Lost: {e}")
 
-# 9. 백그라운드 스레드 관리 루틴
-def start_worker(loop):
+# 9. 백그라운드 스레드 가동
+def start_stt_thread(loop):
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_stt_engine())
+    loop.run_until_complete(translate_engine())
 
-# 10. 마이크 및 스트리머 실행 (네트워크 지연 해결을 위한 ICE 서버 보강)
+# 10. WebRTC 스트리머 설정
+st.divider()
 webrtc_ctx = webrtc_streamer(
-    key="speech-translator",
+    key="speech-translator-v2",
     mode=WebRtcMode.SENDONLY,
     audio_processor_factory=AudioProcessor,
     media_stream_constraints={
         "audio": {
             "sampleRate": 16000,
             "channelCount": 1,
-            "echoCancellation": True,
-            "noiseSuppression": True,
+            "echoCancellation": True
         },
         "video": False
     },
     rtc_configuration={
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-            {"urls": ["stun:stun2.l.google.com:19302"]},
-            {"urls": ["stun:stun3.l.google.com:19302"]},
-            {"urls": ["stun:stun4.l.google.com:19302"]},
-        ]
+        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
     },
 )
 
+# 마이크 실행 중일 때 스레드 감시 및 시작
 if webrtc_ctx.state.playing:
-    if 'stt_worker' not in st.session_state or st.session_state['stt_worker'] is None or not st.session_state['stt_worker'].is_alive():
-        loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=start_worker, args=(loop,), daemon=True)
-        add_script_run_ctx(thread)
-        thread.start()
-        st.session_state['stt_worker'] = thread
-    st.success("🎤 통역 엔진이 활성화됨. 말씀해 주시기 바람.")
+    if 'stt_thread_obj' not in st.session_state or st.session_state['stt_thread_obj'] is None or not st.session_state['stt_thread_obj'].is_alive():
+        new_loop = asyncio.new_event_loop()
+        t = threading.Thread(target=start_stt_thread, args=(new_loop,), daemon=True)
+        add_script_run_ctx(t) # Streamlit 컨텍스트 주입
+        t.start()
+        st.session_state['stt_thread_obj'] = t
+    st.success("🎤 엔진 가동 완료 - 지금 말씀하세요.")
 else:
-    st.session_state['stt_worker'] = None
-    st.info("시작하려면 START 버튼을 누르기 바람.")
+    st.session_state['stt_thread_obj'] = None
+    st.info("시작하려면 START 버튼을 눌러주세요.")
