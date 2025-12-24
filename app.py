@@ -58,7 +58,7 @@ if 'audio_queue' not in st.session_state: st.session_state['audio_queue'] = queu
 
 st.title("🎤 AI 실시간 자동 통역 시스템")
 
-# 5. 사이드바 (NAS)
+# 5. 사이드바 (NAS 연동)
 with st.sidebar:
     st.header("⚙️ NAS & System")
     use_ssl_verify = st.checkbox("SSL 인증서 검증", value=False)
@@ -81,51 +81,49 @@ with st.sidebar:
         st.session_state['en_text_list'], st.session_state['ko_text_list'] = [], []
         st.rerun()
 
-# 6. 통역 표시 레이아웃
+# 6. 통역 결과 레이아웃
 col1, col2 = st.columns(2)
+full_en = "\n\n".join(st.session_state['en_text_list'])
+full_ko = "\n\n".join(st.session_state['ko_text_list'])
+
 with col1:
     st.markdown("### 🇬🇧 English")
-    en_placeholder = st.empty()
+    st.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "Waiting for voice..."}</div>', unsafe_allow_html=True)
+
 with col2:
     st.markdown("### 🇰🇷 한국어")
-    ko_placeholder = st.empty()
+    st.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
 
-def render_display():
-    full_en = "\n\n".join(st.session_state['en_text_list'])
-    full_ko = "\n\n".join(st.session_state['ko_text_list'])
-    en_placeholder.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "Waiting for voice..."}</div>', unsafe_allow_html=True)
-    ko_placeholder.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
-
-render_display()
-
-# 7. 오디오 프로세서 (샘플링 레이트 대응)
+# 7. 오디오 프로세서 (데이터 규격화)
 class AudioProcessor(AudioProcessorBase):
     def recv(self, frame):
-        # 오디오 데이터를 넘파이 배열로 변환
+        # 16-bit PCM 데이터로 변환
         audio = frame.to_ndarray()
-        # AssemblyAI는 16000Hz, Mono, 16-bit PCM을 선호함
-        # 브라우저 기본 샘플 레이트가 높을 경우 데이터 전달이 안될 수 있음
-        # 원시 데이터를 큐에 삽입
-        st.session_state['audio_queue'].put(audio.tobytes())
+        # 스테레오일 경우 모노로 변환
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        # int16 형식으로 변환하여 큐에 삽입
+        audio_int16 = (audio * 32767).astype(np.int16)
+        st.session_state['audio_queue'].put(audio_int16.tobytes())
         return frame
 
-# 8. AssemblyAI 실시간 루프
-async def start_stt_stream():
+# 8. 실시간 통역 엔진 (AssemblyAI + Gemini)
+async def run_stt_engine():
     auth_header = {"Authorization": ASSEMBLY_KEY}
-    # 샘플 레이트를 44100으로 상향 조정 (대부분의 브라우저 기본값)
-    url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=44100"
+    # 브라우저 기본 샘플 레이트가 48000Hz인 경우가 많으므로 명시적 설정
+    url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=48000"
     
     try:
         async with websockets.connect(url, extra_headers=auth_header) as ws:
-            # 첫 메시지 대기 (Session Begun)
+            # 세션 시작 확인 메시지 대기
             await ws.recv()
 
             async def send_audio():
                 while True:
                     try:
+                        # 0.1초 단위로 오디오 조각 전송
                         data = st.session_state['audio_queue'].get(timeout=0.1)
-                        msg = json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")})
-                        await ws.send(msg)
+                        await ws.send(json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")}))
                     except queue.Empty:
                         await asyncio.sleep(0.01)
                     except:
@@ -134,34 +132,34 @@ async def start_stt_stream():
             async def receive_text():
                 while True:
                     try:
-                        res_msg = await ws.recv()
-                        res = json.loads(res_msg)
-                        
+                        msg = await ws.recv()
+                        res = json.loads(msg)
+                        # 최종 확정된 문장만 처리
                         if res.get("message_type") == "FinalTranscript" and res.get("text"):
                             raw_text = res["text"]
-                            # 번역 수행
+                            # Gemini 통역 수행
                             en_res = llm.invoke([HumanMessage(content=f"Convert to formal English lecture transcript: {raw_text}")]).content
                             ko_res = llm.invoke([HumanMessage(content=f"Translate to natural Korean lecture tone: {raw_text}")]).content
                             
                             st.session_state['en_text_list'].append(en_res)
                             st.session_state['ko_text_list'].append(ko_res)
-                            # UI 업데이트를 위한 rerun
+                            # UI 강제 갱신
                             st.rerun()
                     except:
                         break
 
             await asyncio.gather(send_audio(), receive_text())
     except Exception as e:
-        print(f"Connection Error: {e}")
+        print(f"Engine Error: {e}")
 
-# 9. 백그라운드 실행 로직
-def run_loop(loop):
+# 9. 백그라운드 스레드 관리 루틴
+def start_worker(loop):
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_stt_stream())
+    loop.run_until_complete(run_stt_engine())
 
-# 10. WebRTC 스트리머
+# 10. 마이크 및 스트리머 실행
 webrtc_ctx = webrtc_streamer(
-    key="speech-to-text",
+    key="speech-translator",
     mode=WebRtcMode.SENDONLY,
     audio_processor_factory=AudioProcessor,
     media_stream_constraints={"audio": True, "video": False},
@@ -169,13 +167,14 @@ webrtc_ctx = webrtc_streamer(
 )
 
 if webrtc_ctx.state.playing:
-    if 'stt_thread' not in st.session_state or st.session_state['stt_thread'] is None:
+    # 스레드가 없거나 죽어있을 때만 새로 시작
+    if 'stt_worker' not in st.session_state or st.session_state['stt_worker'] is None or not st.session_state['stt_worker'].is_alive():
         loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=run_loop, args=(loop,), daemon=True)
+        thread = threading.Thread(target=start_worker, args=(loop,), daemon=True)
         add_script_run_ctx(thread)
         thread.start()
-        st.session_state['stt_thread'] = thread
-    st.success("🎤 인식 엔진 작동 중 - 지금 말씀하세요.")
+        st.session_state['stt_worker'] = thread
+    st.success("🎤 통역 엔진이 활성화됨. 말씀해 주시기 바람.")
 else:
-    st.session_state['stt_thread'] = None
-    st.info("START 버튼을 눌러 통역을 시작하세요.")
+    st.session_state['stt_worker'] = None
+    st.info("시작하려면 START 버튼을 누르기 바람.")
