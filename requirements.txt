@@ -1,2 +1,5 @@
 streamlit
 requests
+langchain-google-genai
+langchain
+assemblyai
