@@ -1,64 +1,56 @@
 import streamlit as st
 import requests
-import base64
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
 
-# 1. 초기 설정 및 보안 정보 로드
-st.set_page_config(layout="wide", page_title="AI 실시간 특강 통역")
+st.set_page_config(layout="wide", page_title="AI 실시간 통역 시스템")
 
+# 1. Secrets 로드
 try:
     CRED = st.secrets["credentials"]
-    GEMINI_KEY = CRED["GEMINI_KEY"]
-    ASSEMBLY_KEY = CRED["ASSEMBLY_KEY"]
+    SYNO_ID, SYNO_PW = CRED["SYNO_ID"], CRED["SYNO_PW"]
     SYNO_URL = CRED["SYNO_URL"]
-    SYNO_ID = CRED["SYNO_ID"]
-    SYNO_PW = CRED["SYNO_PW"]
 except:
-    st.error("Secrets 설정 확인이 필요합니다.")
+    st.error("Secrets 설정을 확인해 주세요.")
     st.stop()
 
-# 2. 시놀로지 파일 리스트 가져오기 함수
-def get_synology_folders():
-    # 로그인 및 SID 획득
-    auth_url = f"{SYNO_URL}/webapi/auth.cgi?api=SYNO.API.Auth&version=3&method=login&account={SYNO_ID}&passwd={SYNO_PW}&session=FileStation&format=cookie"
-    sid = requests.get(auth_url).json()['data']['sid']
-    
-    # rlrc/509 자료/ 하위 폴더 목록 조회
-    list_url = f"{SYNO_URL}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list&folder_path=/rlrc/509 자료/&_sid={sid}"
-    folders = requests.get(list_url).json()['data']['files']
-    return [f['name'] for f in folders if f['isdir']]
-
-# 3. UI 구성
-st.title("🎤 RLRC 실시간 강의 통역 시스템")
+st.title("🎤 실시간 강의 통역 시스템")
 
 with st.sidebar:
-    st.header("강의 준비")
-    try:
-        subjects = get_synology_folders()
-        selected_subject = st.selectbox("오늘의 강의 주제를 선택하세요", subjects)
-    except:
-        st.warning("시놀로지에서 주제 목록을 가져오지 못했습니다.")
-        selected_subject = "일반 강의"
+    st.header("시놀로지 연동")
     
-    st.divider()
-    if st.button("강의 시작 (마이크 활성화)"):
-        st.session_state.streaming = True
-        st.success("시스템이 가동되었습니다. 말씀해 주세요.")
+    # 세션 유지를 위한 변수 설정
+    if st.button("파일 목록 새로고침"):
+        # 1단계: 로그인하여 SID 획득
+        auth_url = f"{SYNO_URL}/webapi/auth.cgi?api=SYNO.API.Auth&version=3&method=login&account={SYNO_ID}&passwd={SYNO_PW}&session=FileStation&format=cookie"
+        
+        try:
+            auth_res = requests.get(auth_url, timeout=5).json()
+            if auth_res.get("success"):
+                sid = auth_res["data"]["sid"]
+                st.success("✅ 로그인 성공")
+                
+                # 2단계: 특정 경로의 폴더 목록 가져오기
+                # 경로를 'rlrc' 폴더 내부의 '509 자료'로 지정
+                list_url = f"{SYNO_URL}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list&folder_path=/rlrc/509 자료/&_sid={sid}"
+                list_res = requests.get(list_url, timeout=5).json()
+                
+                if list_res.get("success"):
+                    # 폴더만 필터링하여 리스트업
+                    folders = [f['name'] for f in list_res['data']['files'] if f['isdir']]
+                    st.session_state['folder_list'] = folders
+                    st.info(f"📁 {len(folders)}개의 주제를 찾았습니다.")
+                else:
+                    st.error(f"❌ 목록 조회 실패: {list_res.get('error')}")
+            else:
+                st.error("❌ 로그인 실패: ID/PW를 확인하세요.")
+        except Exception as e:
+            st.error(f"접속 에러: {e}")
 
-# 4. 메인 자막 화면 (고정 레이아웃)
+    # 가져온 목록을 선택창에 표시
+    display_list = st.session_state.get('folder_list', ["먼저 새로고침을 눌러주세요"])
+    selected_subject = st.selectbox("오늘의 강의 주제 선택", display_list)
+
+# 메인 화면
+st.subheader(f"현재 선택된 강의: {selected_subject}")
 col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("### 🇬🇧 English Subtitles")
-    en_area = st.empty()
-    en_area.info("Waiting for speech...")
-
-with col2:
-    st.markdown("### 🇰🇷 한국어 실시간 자막")
-    kr_area = st.empty()
-    kr_area.success("음성 인식을 대기 중입니다...")
-
-# 5. 번역 로직 (가이드라인)
-# 내일 실제 실행 시에는 AssemblyAI의 실시간 스트리밍 SDK와 연동되어 
-# 아래 en_area와 kr_area에 결과값이 실시간으로 채워지게 됩니다.
+with col1: st.info("### 🇬🇧 English"); st.write("Translation will appear here.")
+with col2: st.success("### 🇰🇷 한국어"); st.write("실시간 자막이 표시됩니다.")
