@@ -6,6 +6,7 @@ import queue
 import threading
 import base64
 import websockets
+import numpy as np
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from streamlit.runtime.scriptrunner import add_script_run_ctx
@@ -13,7 +14,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 try:
     from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 except ImportError:
-    st.error("streamlit-webrtc 라이브러리 설치가 필요함.")
+    st.error("streamlit-webrtc 라이브러리 설치 필요")
     st.stop()
 
 # 1. 페이지 설정
@@ -36,7 +37,7 @@ try:
     GOOGLE_API_KEY = CRED["GEMINI_KEY"]
     ASSEMBLY_KEY = CRED["ASSEMBLY_KEY"]
 except:
-    st.error("Secrets 설정 확인 필요.")
+    st.error("Secrets 설정 확인 필요")
     st.stop()
 
 # 3. AI 모델
@@ -53,6 +54,7 @@ llm = init_llm()
 if 'en_text_list' not in st.session_state: st.session_state['en_text_list'] = []
 if 'ko_text_list' not in st.session_state: st.session_state['ko_text_list'] = []
 if 'folder_list' not in st.session_state: st.session_state['folder_list'] = []
+if 'audio_queue' not in st.session_state: st.session_state['audio_queue'] = queue.Queue()
 
 st.title("🎤 AI 실시간 자동 통역 시스템")
 
@@ -81,44 +83,49 @@ with st.sidebar:
 
 # 6. 통역 표시 레이아웃
 col1, col2 = st.columns(2)
-full_en = "\n\n".join(st.session_state['en_text_list'])
-full_ko = "\n\n".join(st.session_state['ko_text_list'])
-
 with col1:
     st.markdown("### 🇬🇧 English")
-    st.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "음성 대기 중..."}</div>', unsafe_allow_html=True)
+    en_placeholder = st.empty()
 with col2:
     st.markdown("### 🇰🇷 한국어")
-    st.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
+    ko_placeholder = st.empty()
 
-# 7. 오디오 큐 및 프로세서
-if 'audio_queue' not in st.session_state:
-    st.session_state['audio_queue'] = queue.Queue()
+def render_display():
+    full_en = "\n\n".join(st.session_state['en_text_list'])
+    full_ko = "\n\n".join(st.session_state['ko_text_list'])
+    en_placeholder.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "Waiting for voice..."}</div>', unsafe_allow_html=True)
+    ko_placeholder.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "번역 대기 중..."}</div>', unsafe_allow_html=True)
 
+render_display()
+
+# 7. 오디오 프로세서 (샘플링 레이트 대응)
 class AudioProcessor(AudioProcessorBase):
     def recv(self, frame):
-        # 16bit PCM, 16000Hz 가공 데이터 추출
-        audio_data = frame.to_ndarray().tobytes()
-        st.session_state['audio_queue'].put(audio_data)
+        # 오디오 데이터를 넘파이 배열로 변환
+        audio = frame.to_ndarray()
+        # AssemblyAI는 16000Hz, Mono, 16-bit PCM을 선호함
+        # 브라우저 기본 샘플 레이트가 높을 경우 데이터 전달이 안될 수 있음
+        # 원시 데이터를 큐에 삽입
+        st.session_state['audio_queue'].put(audio.tobytes())
         return frame
 
-# 8. 실시간 STT 및 번역 루프
+# 8. AssemblyAI 실시간 루프
 async def start_stt_stream():
     auth_header = {"Authorization": ASSEMBLY_KEY}
-    # 멀티링구얼 대신 수동 언어 지정 혹은 자동 감지 옵션 정교화
-    url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000"
+    # 샘플 레이트를 44100으로 상향 조정 (대부분의 브라우저 기본값)
+    url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=44100"
     
     try:
         async with websockets.connect(url, extra_headers=auth_header) as ws:
-            # 초기화 메시지 수신 대기
+            # 첫 메시지 대기 (Session Begun)
             await ws.recv()
 
             async def send_audio():
                 while True:
                     try:
-                        # 큐에서 데이터를 가져와 전송
-                        data = st.session_state['audio_queue'].get(timeout=0.2)
-                        await ws.send(json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")}))
+                        data = st.session_state['audio_queue'].get(timeout=0.1)
+                        msg = json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")})
+                        await ws.send(msg)
                     except queue.Empty:
                         await asyncio.sleep(0.01)
                     except:
@@ -127,26 +134,27 @@ async def start_stt_stream():
             async def receive_text():
                 while True:
                     try:
-                        res = json.loads(await ws.recv())
+                        res_msg = await ws.recv()
+                        res = json.loads(res_msg)
+                        
                         if res.get("message_type") == "FinalTranscript" and res.get("text"):
-                            text = res["text"]
-                            # 번역 처리
-                            en_res = llm.invoke([HumanMessage(content=f"Refine to formal English: {text}")]).content
-                            ko_res = llm.invoke([HumanMessage(content=f"Translate to natural Korean: {text}")]).content
+                            raw_text = res["text"]
+                            # 번역 수행
+                            en_res = llm.invoke([HumanMessage(content=f"Convert to formal English lecture transcript: {raw_text}")]).content
+                            ko_res = llm.invoke([HumanMessage(content=f"Translate to natural Korean lecture tone: {raw_text}")]).content
                             
-                            # 세션 리스트 업데이트
                             st.session_state['en_text_list'].append(en_res)
                             st.session_state['ko_text_list'].append(ko_res)
-                            # 강제 리런 (백그라운드에서 실행되므로 트리거 필요)
+                            # UI 업데이트를 위한 rerun
                             st.rerun()
                     except:
                         break
 
             await asyncio.gather(send_audio(), receive_text())
     except Exception as e:
-        print(f"WS Error: {e}")
+        print(f"Connection Error: {e}")
 
-# 9. 백그라운드 스레드 제어
+# 9. 백그라운드 실행 로직
 def run_loop(loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(start_stt_stream())
@@ -164,11 +172,10 @@ if webrtc_ctx.state.playing:
     if 'stt_thread' not in st.session_state or st.session_state['stt_thread'] is None:
         loop = asyncio.new_event_loop()
         thread = threading.Thread(target=run_loop, args=(loop,), daemon=True)
-        # 중요: 스레드에 Streamlit 컨텍스트 주입
         add_script_run_ctx(thread)
         thread.start()
         st.session_state['stt_thread'] = thread
-    st.success("🎤 실시간 통역 중")
+    st.success("🎤 인식 엔진 작동 중 - 지금 말씀하세요.")
 else:
     st.session_state['stt_thread'] = None
-    st.info("START 버튼을 눌러 통역을 시작해.")
+    st.info("START 버튼을 눌러 통역을 시작하세요.")
