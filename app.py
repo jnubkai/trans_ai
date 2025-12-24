@@ -64,15 +64,16 @@ with st.sidebar:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         
-        # 시놀로지 로그인 파라미터 (버전 6으로 상향 및 파라미터 보강)
+        # 서버 권장 사항 반영: API 버전 7 사용
+        # 에러 코드 400 방지를 위해 파라미터 재구성
         login_params = {
             "api": "SYNO.API.Auth",
-            "version": "6",
+            "version": "7",
             "method": "login",
             "account": SYNO_ID,
             "passwd": SYNO_PW,
             "session": "FileStation",
-            "format": "sid"
+            "format": "cookie"  # 버전 7에서는 cookie 방식 선호됨
         }
         
         try:
@@ -110,10 +111,13 @@ with st.sidebar:
                     else:
                         st.error(f"목록 로드 실패 (Error Code: {list_res.get('error', {}).get('code')})")
                 else:
-                    # 상세 에러 코드 출력 유도
-                    error_code = auth_res.get("error", {}).get("code")
+                    # 상세 에러 코드 출력
+                    error_info = auth_res.get("error", {})
+                    error_code = error_info.get("code", "Unknown")
                     st.error(f"NAS 로그인 실패 (Error Code: {error_code})")
-                    st.info("Tip: 2단계 인증(OTP)이 설정되어 있거나, 해당 계정의 FileStation 권한을 확인해 봐.")
+                    
+                    if str(error_code) == "400":
+                        st.warning("400 에러 감지: API 버전이나 파라미터 형식이 맞지 않음. 버전 6으로 다시 시도하거나 계정 권한 확인 필요함.")
         except Exception as e:
             st.error(f"접속 불가: {type(e).__name__}")
         finally:
