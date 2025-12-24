@@ -6,3 +6,4 @@ langchain-community
 langchain-google-genai
 langchain-openai
 assemblyai
+streamlit-webrtc
