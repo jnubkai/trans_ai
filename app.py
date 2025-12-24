@@ -54,37 +54,40 @@ st.title("🎤 RLRC 실시간 강의 통역 시스템")
 with st.sidebar:
     st.header("⚙️ 강의 환경 설정")
     
-    # HTTPS 보안 경고 제어 옵션 (사설 인증서 사용 시 필수)
-    use_ssl_verify = st.checkbox("SSL 인증서 검증 활성화", value=False, help="synology.me 사설 인증서 사용 시 체크 해제 권장.")
+    # HTTPS 보안 경고 제어 옵션
+    use_ssl_verify = st.checkbox("SSL 인증서 검증 활성화", value=False, help="인증서 오류 시 체크 해제.")
     
     if st.button("📁 시놀로지 목록 업데이트", use_container_width=True):
         session = requests.Session()
+        # 브라우저인 것처럼 헤더 추가 (차단 방지)
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
         
-        # 시놀로지 로그인 파라미터
+        # 시놀로지 로그인 파라미터 (버전 6으로 상향 및 파라미터 보강)
         login_params = {
             "api": "SYNO.API.Auth",
-            "version": "3",
+            "version": "6",
             "method": "login",
             "account": SYNO_ID,
             "passwd": SYNO_PW,
             "session": "FileStation",
-            "format": "cookie"
+            "format": "sid"
         }
         
         try:
             with st.spinner(f"NAS 연결 중 ({SYNO_URL})..."):
-                # SSL 검증 여부 적용
                 auth_res = session.get(
                     f"{SYNO_URL}/webapi/auth.cgi", 
                     params=login_params, 
-                    timeout=10, 
+                    timeout=15, 
                     verify=use_ssl_verify
                 ).json()
                 
                 if auth_res.get("success"):
                     st.session_state['sid'] = auth_res["data"]["sid"]
                     
-                    # 폴더 목록 조회
+                    # 폴더 목록 조회 (버전 2)
                     list_params = {
                         "api": "SYNO.FileStation.List",
                         "version": "2",
@@ -96,7 +99,7 @@ with st.sidebar:
                     list_res = session.get(
                         f"{SYNO_URL}/webapi/entry.cgi", 
                         params=list_params, 
-                        timeout=10, 
+                        timeout=15, 
                         verify=use_ssl_verify
                     ).json()
                     
@@ -105,13 +108,14 @@ with st.sidebar:
                         st.session_state['folder_list'] = sorted(folders)
                         st.toast(f"{len(folders)}개의 강의 주제 발견", icon="📂")
                     else:
-                        st.error(f"목록 로드 실패 (코드: {list_res.get('error')})")
+                        st.error(f"목록 로드 실패 (Error Code: {list_res.get('error', {}).get('code')})")
                 else:
-                    st.error(f"NAS 로그인 실패: 주소({SYNO_URL}) 또는 계정 정보를 확인하세요.")
-        except requests.exceptions.SSLError:
-            st.error("SSL 인증 오류: 'SSL 인증서 검증 활성화'를 해제하고 다시 시도하세요.")
+                    # 상세 에러 코드 출력 유도
+                    error_code = auth_res.get("error", {}).get("code")
+                    st.error(f"NAS 로그인 실패 (Error Code: {error_code})")
+                    st.info("Tip: 2단계 인증(OTP)이 설정되어 있거나, 해당 계정의 FileStation 권한을 확인해 봐.")
         except Exception as e:
-            st.error(f"접속 불가: {SYNO_URL} 서버 응답 없음 ({type(e).__name__})")
+            st.error(f"접속 불가: {type(e).__name__}")
         finally:
             session.close()
 
