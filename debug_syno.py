@@ -1,13 +1,14 @@
 import streamlit as st
 import requests
-from requests.auth import HTTPBasicAuth
+from requests.auth import HTTPBasicAuth, HTTPDigestAuth
 import xml.etree.ElementTree as ET
 import time
 import urllib.parse
+import base64
 
 st.set_page_config(page_title="시놀로지 WebDAV 연결 테스트")
 
-st.title("🌐 시놀로지 WebDAV 연결 테스트 (대안 모드)")
+st.title("🌐 시놀로지 WebDAV 연결 테스트 (포트포워딩 대응)")
 
 # 1. Secrets 로드 및 WebDAV 설정
 try:
@@ -22,96 +23,91 @@ try:
         SYNO_URL = st.secrets.get("SYNO_URL")
     
     if SYNO_URL:
-        # URL에서 기존 포트가 있다면 제거하고 7605로 재구성하거나 확인하는 로직
         SYNO_URL = SYNO_URL.rstrip('/')
+        # 외부 포트 7605 고정 처리 (iptime 외부 포트)
         if ":7655" in SYNO_URL:
             SYNO_URL = SYNO_URL.replace(":7655", ":7605")
         elif ":7605" not in SYNO_URL:
-            # 포트가 명시되지 않은 경우 강제 지정 (필요 시)
-            pass
+            parsed_url = urllib.parse.urlparse(SYNO_URL)
+            base_netloc = parsed_url.netloc.split(':')[0]
+            SYNO_URL = f"{parsed_url.scheme}://{base_netloc}:7605"
 
     st.success(f"✅ 설정 로드 성공: {SYNO_URL}")
 except Exception as e:
     st.error(f"Secrets 접근 중 에러: {e}")
     st.stop()
 
-st.info("""
-**💡 WebDAV 사용 전 체크리스트 (시놀로지 설정)**
-1. 시놀로지 패키지 센터에서 **'WebDAV Server'** 설치 및 실행 중인지 확인.
-2. WebDAV 설정에서 **HTTP(7605)** 포트가 활성화되었는지 확인.
-3. 공유기(iptime 등)에서 **외부 포트 7605**가 시놀로지의 WebDAV 내부 포트(기본 5005 등)로 **포트포워딩** 되어 있는지 확인.
+st.info(f"""
+**💡 네트워크 구조 확인**
+- **외부 접속 주소**: {SYNO_URL}
+- **포트포워딩**: iptime(7605) → 시놀로지(5005)
+- **인증 이슈**: HTTP(비암호화) 환경이므로 시놀로지 WebDAV 설정에서 'HTTP 활성화' 및 'Basic 인증 허용' 여부가 중요함.
 """)
 
-if st.button("WebDAV 방식으로 목록 조회 시작"):
-    # WebDAV는 표준 PROPFIND 메서드를 사용함
+if st.button("WebDAV 인증 방식 교차 테스트 시작"):
+    # 공용 헤더 및 경로 설정
+    target_path = "/RLRC/509 자료"
+    encoded_path = urllib.parse.quote(target_path)
+    full_url = f"{SYNO_URL}{encoded_path}"
+    
     headers = {
         "Depth": "1",
-        "Content-Type": "application/xml; charset=utf-8"
+        "Content-Type": "application/xml; charset=utf-8",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # PROPFIND 요청을 위한 기본 XML 바디
     body = """<?xml version="1.0" encoding="utf-8" ?>
     <D:propfind xmlns:D="DAV:">
-      <D:prop>
-        <D:displayname/>
-        <D:resourcetype/>
-      </D:prop>
+      <D:prop><D:displayname/><D:resourcetype/></D:prop>
     </D:propfind>"""
 
-    try:
-        st.subheader("1단계: WebDAV 연결 시도 (Port: 7605)")
-        start_time = time.time()
-        
-        # 타겟 경로: /RLRC/509 자료 (URL 인코딩 처리)
-        target_path = urllib.parse.quote("/RLRC/509 자료")
-        full_url = f"{SYNO_URL}{target_path}"
-        
-        st.write(f"📡 요청 URL: {full_url}")
-        
-        # WebDAV는 Basic Auth를 주로 사용함
-        response = requests.request(
-            "PROPFIND", 
-            full_url, 
-            auth=HTTPBasicAuth(SYNO_ID, SYNO_PW),
-            headers=headers,
-            data=body,
-            timeout=15
-        )
-        
-        st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초 | HTTP 상태: {response.status_code}")
+    # 테스트할 인증 방식 목록
+    auth_methods = [
+        ("Basic Auth (Preemptive)", "headers_only"),
+        ("Basic Auth (Standard)", HTTPBasicAuth(SYNO_ID, SYNO_PW)),
+        ("Digest Auth", HTTPDigestAuth(SYNO_ID, SYNO_PW))
+    ]
 
-        if response.status_code in [200, 207]:
-            st.success("🎉 WebDAV 접속 및 목록 조회 성공!")
-            
-            # XML 응답 파싱
-            root = ET.fromstring(response.content)
-            ns = {'d': 'DAV:'}
-            folders = []
-            
-            for resp in root.findall('d:response', ns):
-                href = resp.find('d:href', ns).text
-                propstat = resp.find('d:propstat', ns)
-                prop = propstat.find('d:prop', ns)
-                resourcetype = prop.find('d:resourcetype', ns)
+    for name, auth_obj in auth_methods:
+        st.write(f"--- 테스트 중: {name} ---")
+        try:
+            current_headers = headers.copy()
+            current_auth = None
+
+            if name == "Basic Auth (Preemptive)":
+                # 인증 정보를 헤더에 미리 포함 (가장 권장되는 방식)
+                auth_str = f"{SYNO_ID}:{SYNO_PW}"
+                encoded_auth = base64.b64encode(auth_str.encode('utf-8')).decode('utf-8')
+                current_headers["Authorization"] = f"Basic {encoded_auth}"
+            else:
+                current_auth = auth_obj
+
+            response = requests.request(
+                "PROPFIND", 
+                full_url, 
+                headers=current_headers,
+                auth=current_auth,
+                data=body,
+                timeout=10
+            )
+
+            st.write(f"HTTP 상태: {response.status_code}")
+
+            if response.status_code in [200, 207]:
+                st.success(f"🎉 {name} 방식으로 접속 성공!")
+                root = ET.fromstring(response.content)
+                ns = {'d': 'DAV:'}
+                folders = [urllib.parse.unquote(r.find('d:href', ns).text).rstrip('/').split('/')[-1] 
+                           for r in root.findall('d:response', ns) if r.find('d:propstat/d:prop/d:resourcetype/d:collection', ns) is not None]
+                st.write(f"발견된 항목: {len(folders)}개")
+                break 
+            elif response.status_code == 401:
+                st.warning(f"{name} 인증 실패")
+            else:
+                st.error(f"기타 에러: {response.status_code}")
                 
-                if resourcetype is not None and resourcetype.find('d:collection', ns) is not None:
-                    name = urllib.parse.unquote(href).rstrip('/').split('/')[-1]
-                    if name and name != "509 자료":
-                        folders.append(name)
-            
-            st.write("### 📂 발견된 폴더 목록")
-            st.write(folders)
-            
-        elif response.status_code == 401:
-            st.error("🚨 인증 실패: 아이디 또는 비밀번호가 틀렸거나 WebDAV 권한이 없습니다.")
-        elif response.status_code == 405:
-            st.error("🚨 메서드 허용 안 됨: 시놀로지에서 WebDAV 서비스가 꺼져 있거나 포트포워딩 설정 오류일 수 있습니다.")
-        else:
-            st.error(f"🚨 오류 발생 (상태 코드: {response.status_code})")
-            st.text(response.text)
-
-    except Exception as e:
-        st.error(f"🚨 네트워크 에러: {e}")
+        except Exception as e:
+            st.error(f"실행 중 에러: {e}")
 
 st.divider()
-st.caption("포트 7605를 사용하여 WebDAV 프로토콜 연결을 테스트함.")
+st.caption("외부 7605 포트를 통해 시놀로지 내부 5005 포트로 연결되는 환경을 테스트함.")
