@@ -7,14 +7,14 @@ from langchain_core.messages import HumanMessage
 # 1. 페이지 설정
 st.set_page_config(layout="wide", page_title="AI 실시간 통역 시스템")
 
-# 디자인 커스텀
+# 디자인 커스텀 (unsafe_allow_html 오타 수정 완료)
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
     .stInfo { font-size: 1.1rem; min-height: 250px; border-radius: 10px; }
     .stSuccess { font-size: 1.1rem; min-height: 250px; border-radius: 10px; }
     </style>
-    """, unsafe_allow_stdio=True)
+    """, unsafe_allow_html=True)
 
 # 2. Secrets 로드 및 검증
 try:
