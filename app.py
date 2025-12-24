@@ -64,8 +64,8 @@ with st.sidebar:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
         
-        # 서버 권장 사항 반영: API 버전 7 사용
-        # 에러 코드 400 방지를 위해 파라미터 재구성
+        # 버전 7 최적화 파라미터
+        # 400 에러 방지를 위해 format을 sid로 지정하고 session 파라미터 확인
         login_params = {
             "api": "SYNO.API.Auth",
             "version": "7",
@@ -73,28 +73,31 @@ with st.sidebar:
             "account": SYNO_ID,
             "passwd": SYNO_PW,
             "session": "FileStation",
-            "format": "cookie"  # 버전 7에서는 cookie 방식 선호됨
+            "format": "sid" 
         }
         
         try:
             with st.spinner(f"NAS 연결 중 ({SYNO_URL})..."):
-                auth_res = session.get(
+                # 1단계: 로그인 시도
+                auth_response = session.get(
                     f"{SYNO_URL}/webapi/auth.cgi", 
                     params=login_params, 
                     timeout=15, 
                     verify=use_ssl_verify
-                ).json()
+                )
+                auth_res = auth_response.json()
                 
                 if auth_res.get("success"):
-                    st.session_state['sid'] = auth_res["data"]["sid"]
+                    sid = auth_res["data"]["sid"]
+                    st.session_state['sid'] = sid
                     
-                    # 폴더 목록 조회 (버전 2)
+                    # 2단계: 폴더 목록 조회 (FileStation API)
                     list_params = {
                         "api": "SYNO.FileStation.List",
                         "version": "2",
                         "method": "list",
                         "folder_path": "/RLRC/509 자료",
-                        "_sid": st.session_state['sid']
+                        "_sid": sid
                     }
                     
                     list_res = session.get(
@@ -111,13 +114,12 @@ with st.sidebar:
                     else:
                         st.error(f"목록 로드 실패 (Error Code: {list_res.get('error', {}).get('code')})")
                 else:
-                    # 상세 에러 코드 출력
                     error_info = auth_res.get("error", {})
                     error_code = error_info.get("code", "Unknown")
                     st.error(f"NAS 로그인 실패 (Error Code: {error_code})")
                     
                     if str(error_code) == "400":
-                        st.warning("400 에러 감지: API 버전이나 파라미터 형식이 맞지 않음. 버전 6으로 다시 시도하거나 계정 권한 확인 필요함.")
+                        st.warning("파라미터 구조 재검토 중: 계정 권한과 2단계 인증이 정상이므로 API 진입점이나 프로토콜 포트를 다시 확인해 봐.")
         except Exception as e:
             st.error(f"접속 불가: {type(e).__name__}")
         finally:
