@@ -61,12 +61,13 @@ with st.sidebar:
         session = requests.Session()
         # 브라우저인 것처럼 헤더 추가 (차단 방지)
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*"
         })
         
-        # 버전 7 최적화 파라미터
-        # 400 에러 방지를 위해 format을 sid로 지정하고 session 파라미터 확인
-        login_params = {
+        # 400 에러 해결을 위한 POST 방식 및 파라미터 최적화
+        # 시놀로지 API v7은 POST 데이터를 더 안정적으로 처리함
+        login_data = {
             "api": "SYNO.API.Auth",
             "version": "7",
             "method": "login",
@@ -78,11 +79,11 @@ with st.sidebar:
         
         try:
             with st.spinner(f"NAS 연결 중 ({SYNO_URL})..."):
-                # 1단계: 로그인 시도
-                auth_response = session.get(
+                # 1단계: 로그인 시도 (POST로 전환하여 특수문자 및 페이로드 보안 강화)
+                auth_response = session.post(
                     f"{SYNO_URL}/webapi/auth.cgi", 
-                    params=login_params, 
-                    timeout=15, 
+                    data=login_data, 
+                    timeout=20, 
                     verify=use_ssl_verify
                 )
                 auth_res = auth_response.json()
@@ -92,6 +93,7 @@ with st.sidebar:
                     st.session_state['sid'] = sid
                     
                     # 2단계: 폴더 목록 조회 (FileStation API)
+                    # 데이터 조회는 GET이 표준이지만 sid를 파라미터로 명시
                     list_params = {
                         "api": "SYNO.FileStation.List",
                         "version": "2",
@@ -103,7 +105,7 @@ with st.sidebar:
                     list_res = session.get(
                         f"{SYNO_URL}/webapi/entry.cgi", 
                         params=list_params, 
-                        timeout=15, 
+                        timeout=20, 
                         verify=use_ssl_verify
                     ).json()
                     
@@ -119,9 +121,9 @@ with st.sidebar:
                     st.error(f"NAS 로그인 실패 (Error Code: {error_code})")
                     
                     if str(error_code) == "400":
-                        st.warning("파라미터 구조 재검토 중: 계정 권한과 2단계 인증이 정상이므로 API 진입점이나 프로토콜 포트를 다시 확인해 봐.")
+                        st.warning("여전히 400 에러 발생 시: 시놀로지 제어판 > 보안 > 브라우저 호환성에서 'HTTP 압축 활성화' 등을 확인하거나, 패스워드에 API가 거부하는 특수문자가 있는지 점검 필요함.")
         except Exception as e:
-            st.error(f"접속 불가: {type(e).__name__}")
+            st.error(f"접속 불가: {type(e).__name__} - {str(e)}")
         finally:
             session.close()
 
