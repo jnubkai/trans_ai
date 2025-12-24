@@ -35,7 +35,7 @@ if st.button("통신 테스트 시작"):
     session = requests.Session()
     
     try:
-        # 0단계: API 정보 확인 (DSM 버전별 지원 확인)
+        # 0단계: API 정보 확인 (이미 성공한 로직)
         st.subheader("0단계: API 정보 조회 (Info API)")
         info_params = {
             "api": "SYNO.API.Info",
@@ -47,22 +47,23 @@ if st.button("통신 테스트 시작"):
         st.json(info_res)
 
         # 1단계: 로그인 시도
-        st.subheader("1단계: 로그인 시도 (정밀 파라미터 적용)")
+        # Info 결과에 따라 경로를 auth.cgi가 아닌 entry.cgi로 변경
+        st.subheader("1단계: 로그인 시도 (entry.cgi 및 Version 7 적용)")
         start_time = time.time()
         
-        # DSM 7.2에서 가장 보편적인 파라미터 셋
+        # Info API에서 확인된 최신 버전 7 및 권장 경로 사용
         login_params = {
             "api": "SYNO.API.Auth",
-            "version": "6", 
+            "version": "7", 
             "method": "login",
             "account": SYNO_ID,
             "passwd": SYNO_PW,
             "session": "FileStation",
-            "format": "sid",
-            "enable_device_token": "no" # DSM 7.x 보안 옵션
+            "format": "sid"
         }
         
-        response = session.get(f"{SYNO_URL}/webapi/auth.cgi", params=login_params, timeout=10)
+        # DSM 7.2 응답에 따라 entry.cgi로 호출
+        response = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=login_params, timeout=10)
         st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
         
         res_data = response.json()
@@ -82,6 +83,7 @@ if st.button("통신 테스트 시작"):
                 "folder_path": "/RLRC/509 자료",
                 "_sid": sid
             }
+            # 목록 조회 역시 entry.cgi 사용
             list_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=list_params, timeout=10)
             st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
             st.json(list_res.json())
@@ -91,8 +93,7 @@ if st.button("통신 테스트 시작"):
             st.error(f"로그인 실패 (에러 코드: {error_code})")
             
             if error_code == 400:
-                st.warning("⚠️ 파라미터 거부됨. 'passwd' 특수문자 인코딩 혹은 'api' 명칭 재점검이 필요함.")
-                st.info("Tip: 시놀로지 제어판 > 보안 > 계정에서 '2단계 인증'이 강제되어 있는지 확인 바람.")
+                st.warning("⚠️ 파라미터 거부됨. 'passwd'의 특수문자 전송 시 브라우저 인코딩 이슈 가능성 있음.")
             
     except Exception as e:
         st.error(f"🚨 네트워크 에러 발생: {e}")
