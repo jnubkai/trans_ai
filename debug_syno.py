@@ -33,10 +33,10 @@ except Exception as e:
 
 if st.button("통신 테스트 시작"):
     session = requests.Session()
-    # DSM 7.2는 표준 브라우저 헤더를 선호함
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
-    }
+    # 표준 브라우저 환경 모사
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
     
     try:
         # 0단계: API 정보 확인
@@ -50,61 +50,72 @@ if st.button("통신 테스트 시작"):
         info_res = session.get(f"{SYNO_URL}/webapi/query.cgi", params=info_params, timeout=10).json()
         st.json(info_res)
 
-        # 1단계: 로그인 시도 (POST 방식 변경 및 인코딩 무결성 강화)
-        st.subheader("1단계: 로그인 시도 (POST 방식 및 Version 7)")
-        start_time = time.time()
+        # 1단계: 로그인 시도 (다양한 버전 시도)
+        st.subheader("1단계: 로그인 시도 (버전별 순차 테스트)")
         
-        # 비밀번호 내 특수문자(@ 등) 이슈 방지를 위해 데이터를 딕셔너리로 구성 후 POST 전송
-        login_data = {
-            "api": "SYNO.API.Auth",
-            "version": "7", 
-            "method": "login",
-            "account": SYNO_ID,
-            "passwd": SYNO_PW,
-            "session": "FileStation",
-            "format": "sid"
-        }
+        # DSM 7.2에서 성공 가능성이 높은 버전 목록
+        test_versions = ["7", "6", "4", "3"]
         
-        # entry.cgi로 POST 요청 발송
-        response = session.post(
-            f"{SYNO_URL}/webapi/entry.cgi", 
-            data=login_data, 
-            headers=headers,
-            timeout=10
-        )
-        
-        st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
-        res_data = response.json()
-        st.json(res_data)
-        
-        if res_data.get("success"):
-            sid = res_data["data"]["sid"]
-            st.success(f"로그인 성공! SID: {sid}")
-            
-            # 2단계: 목록 조회 시도
-            st.subheader("2단계: 목록 조회 시도")
+        for ver in test_versions:
+            st.write(f"--- 테스트 중인 버전: {ver} ---")
             start_time = time.time()
-            list_params = {
-                "api": "SYNO.FileStation.List",
-                "version": "2", 
-                "method": "list",
-                "folder_path": "/RLRC/509 자료",
-                "_sid": sid
+            
+            # POST 데이터 구성
+            login_data = {
+                "api": "SYNO.API.Auth",
+                "version": ver, 
+                "method": "login",
+                "account": SYNO_ID,
+                "passwd": SYNO_PW,
+                "session": "FileStation",
+                "format": "sid"
             }
-            # 목록 조회는 관습적으로 GET 사용하나 보안 세션은 유지됨
-            list_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=list_params, timeout=10)
-            st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
-            st.json(list_res.json())
             
-        else:
-            error_code = res_data.get("error", {}).get("code")
-            st.error(f"로그인 실패 (에러 코드: {error_code})")
+            try:
+                response = session.post(
+                    f"{SYNO_URL}/webapi/entry.cgi", 
+                    data=login_data, 
+                    timeout=10
+                )
+                
+                duration = time.time() - start_time
+                res_json = response.json()
+                
+                st.write(f"⏱️ 소요 시간: {duration:.2f}초 | HTTP 상태: {response.status_code}")
+                st.json(res_json)
+                
+                if res_json.get("success"):
+                    sid = res_json["data"]["sid"]
+                    st.success(f"🎉 버전 {ver}로 로그인 성공! SID 획득.")
+                    
+                    # 2단계: 목록 조회 시도
+                    st.subheader("2단계: 목록 조회 시도")
+                    list_params = {
+                        "api": "SYNO.FileStation.List",
+                        "version": "2", 
+                        "method": "list",
+                        "folder_path": "/RLRC/509 자료",
+                        "_sid": sid
+                    }
+                    list_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=list_params, timeout=10).json()
+                    st.json(list_res)
+                    break # 성공하면 반복문 종료
+                else:
+                    error_code = res_json.get("error", {}).get("code")
+                    if error_code == 400:
+                        st.warning(f"버전 {ver}: 400 에러 (파라미터 부적합)")
+                    elif error_code == 403:
+                        st.error(f"버전 {ver}: 403 에러 (2단계 인증 필요 혹은 차단됨)")
+                    elif error_code == 401:
+                        st.error(f"버전 {ver}: 401 에러 (계정정보 불일치)")
             
-            if error_code == 400:
-                st.warning("⚠️ 400 에러 지속: POST 방식으로도 거절됨.")
-                st.info("디버깅 포인트: 비밀번호를 따옴표 없이 입력했거나, 시놀로지에서 '특수문자 포함 비밀번호' 전송 시 추가 보안 요구 중일 수 있음.")
-            
+            except Exception as e:
+                st.error(f"버전 {ver} 테스트 중 에러: {e}")
+
     except Exception as e:
         st.error(f"🚨 네트워크 에러 발생: {e}")
     finally:
         session.close()
+
+st.divider()
+st.caption("DSM 7.2.1-69057 Update 8 대응 디버깅 모드")
