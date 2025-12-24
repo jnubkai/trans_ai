@@ -98,50 +98,61 @@ audio_queue = queue.Queue()
 
 class AudioProcessor(AudioProcessorBase):
     def recv(self, frame):
-        # 마이크에서 오디오 원시 데이터(Raw PCM) 추출
+        # 16kHz Mono로 변환된 데이터 추출 (AssemblyAI 권장 규격)
         audio_data = frame.to_ndarray().tobytes()
         audio_queue.put(audio_data)
         return frame
 
-# 8. AssemblyAI WebSocket 및 번역 비동기 처리
-async def assemblyai_stt_loop():
+# 8. AssemblyAI WebSocket 및 번역 비동기 처리 함수
+async def start_stt_stream():
     auth_header = {"Authorization": ASSEMBLY_KEY}
-    # 실시간 다국어 감지 모드로 접속
     url = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000&multilingual=true"
     
-    try:
-        async with websockets.connect(url, extra_headers=auth_header) as ws:
-            async def send_audio():
-                while True:
-                    data = await asyncio.get_event_loop().run_in_executor(None, audio_queue.get)
+    async with websockets.connect(url, extra_headers=auth_header) as ws:
+        # 최초 연결 시 대기
+        await ws.recv() 
+
+        async def send_audio():
+            while True:
+                try:
+                    data = audio_queue.get(timeout=0.1)
                     msg = json.dumps({"audio_data": base64.b64encode(data).decode("utf-8")})
                     await ws.send(msg)
+                except queue.Empty:
                     await asyncio.sleep(0.01)
+                except Exception:
+                    break
 
-            async def receive_text():
-                while True:
+        async def receive_text():
+            while True:
+                try:
                     result_str = await ws.recv()
                     result = json.loads(result_str)
                     
-                    # 최종 인식 결과(Final Transcript)가 나왔을 때만 처리
                     if result.get("message_type") == "FinalTranscript" and result.get("text"):
                         raw_text = result["text"]
                         
-                        # Gemini 번역/정제 수행
-                        en_out = llm.invoke([HumanMessage(content=f"Fix and formalize this as English lecture transcript: {raw_text}")]).content
-                        ko_out = llm.invoke([HumanMessage(content=f"Translate this to natural Korean lecture tone: {raw_text}")]).content
+                        # Gemini 번역 수행
+                        en_out = llm.invoke([HumanMessage(content=f"Fix/Formalize English lecture: {raw_text}")]).content
+                        ko_out = llm.invoke([HumanMessage(content=f"Translate to natural Korean lecture: {raw_text}")]).content
                         
                         st.session_state['en_text_list'].append(en_out)
                         st.session_state['ko_text_list'].append(ko_out)
-                        
-                        # UI 갱신 유도
-                        st.rerun()
+                        # Streamlit의 상태 변경을 알리기 위해 빈 엘리먼트 갱신 시도 (혹은 rerun)
+                except Exception:
+                    break
 
-            await asyncio.gather(send_audio(), receive_text())
-    except:
-        pass
+        await asyncio.gather(send_audio(), receive_text())
 
-# 9. 마이크 스트리머 실행
+# 9. 백그라운드 스레드 관리
+def run_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_stt_stream())
+
+if 'stt_thread' not in st.session_state:
+    st.session_state['stt_thread'] = None
+
+# 10. 마이크 스트리머 실행
 st.divider()
 webrtc_ctx = webrtc_streamer(
     key="translator",
@@ -151,10 +162,14 @@ webrtc_ctx = webrtc_streamer(
     rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
 )
 
-# 스트리밍 중일 때 백그라운드에서 STT 루프 실행
+# 마이크가 켜졌을 때 스레드가 없으면 생성하여 실행
 if webrtc_ctx.state.playing:
-    st.success("🎤 실시간 통역 엔진 가동 중")
-    # Streamlit Cloud 환경에서 비동기 루프를 유지하기 위해 스레드 사용 고려 가능
-    # 여기서는 간단히 루프 안내만 표시 (실제 배포 시 백엔드 워커 연동 필요)
+    if st.session_state['stt_thread'] is None or not st.session_state['stt_thread'].is_alive():
+        new_loop = asyncio.new_event_loop()
+        t = threading.Thread(target=run_async_loop, args=(new_loop,), daemon=True)
+        t.start()
+        st.session_state['stt_thread'] = t
+    st.success("🎤 실시간 엔진 작동 중 - 마이크에 대고 말씀해 보세요.")
 else:
+    st.session_state['stt_thread'] = None
     st.info("시작하려면 위 START 버튼을 눌러.")
