@@ -33,9 +33,13 @@ except Exception as e:
 
 if st.button("통신 테스트 시작"):
     session = requests.Session()
+    # DSM 7.2는 표준 브라우저 헤더를 선호함
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+    }
     
     try:
-        # 0단계: API 정보 확인 (이미 성공한 로직)
+        # 0단계: API 정보 확인
         st.subheader("0단계: API 정보 조회 (Info API)")
         info_params = {
             "api": "SYNO.API.Info",
@@ -46,13 +50,12 @@ if st.button("통신 테스트 시작"):
         info_res = session.get(f"{SYNO_URL}/webapi/query.cgi", params=info_params, timeout=10).json()
         st.json(info_res)
 
-        # 1단계: 로그인 시도
-        # Info 결과에 따라 경로를 auth.cgi가 아닌 entry.cgi로 변경
-        st.subheader("1단계: 로그인 시도 (entry.cgi 및 Version 7 적용)")
+        # 1단계: 로그인 시도 (POST 방식 변경 및 인코딩 무결성 강화)
+        st.subheader("1단계: 로그인 시도 (POST 방식 및 Version 7)")
         start_time = time.time()
         
-        # Info API에서 확인된 최신 버전 7 및 권장 경로 사용
-        login_params = {
+        # 비밀번호 내 특수문자(@ 등) 이슈 방지를 위해 데이터를 딕셔너리로 구성 후 POST 전송
+        login_data = {
             "api": "SYNO.API.Auth",
             "version": "7", 
             "method": "login",
@@ -62,10 +65,15 @@ if st.button("통신 테스트 시작"):
             "format": "sid"
         }
         
-        # DSM 7.2 응답에 따라 entry.cgi로 호출
-        response = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=login_params, timeout=10)
-        st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
+        # entry.cgi로 POST 요청 발송
+        response = session.post(
+            f"{SYNO_URL}/webapi/entry.cgi", 
+            data=login_data, 
+            headers=headers,
+            timeout=10
+        )
         
+        st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
         res_data = response.json()
         st.json(res_data)
         
@@ -83,7 +91,7 @@ if st.button("통신 테스트 시작"):
                 "folder_path": "/RLRC/509 자료",
                 "_sid": sid
             }
-            # 목록 조회 역시 entry.cgi 사용
+            # 목록 조회는 관습적으로 GET 사용하나 보안 세션은 유지됨
             list_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=list_params, timeout=10)
             st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
             st.json(list_res.json())
@@ -93,7 +101,8 @@ if st.button("통신 테스트 시작"):
             st.error(f"로그인 실패 (에러 코드: {error_code})")
             
             if error_code == 400:
-                st.warning("⚠️ 파라미터 거부됨. 'passwd'의 특수문자 전송 시 브라우저 인코딩 이슈 가능성 있음.")
+                st.warning("⚠️ 400 에러 지속: POST 방식으로도 거절됨.")
+                st.info("디버깅 포인트: 비밀번호를 따옴표 없이 입력했거나, 시놀로지에서 '특수문자 포함 비밀번호' 전송 시 추가 보안 요구 중일 수 있음.")
             
     except Exception as e:
         st.error(f"🚨 네트워크 에러 발생: {e}")
