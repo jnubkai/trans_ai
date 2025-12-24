@@ -5,18 +5,16 @@ import json
 
 st.set_page_config(page_title="시놀로지 접속 디버깅")
 
-st.title("🔍 시놀로지 접속 상세 디버깅 (DSM 7.2 대응)")
+st.title("🔍 시놀로지 접속 상세 디버깅 (DSM 7.2 정밀 대응)")
 
-# 1. Secrets 로드 로직 (사용자 제공 구조 반영)
+# 1. Secrets 로드 로직
 try:
-    # [credentials] 섹션 직접 접근
     if "credentials" in st.secrets:
         CRED = st.secrets["credentials"]
         SYNO_ID = CRED.get("SYNO_ID")
         SYNO_PW = CRED.get("SYNO_PW")
         SYNO_URL = CRED.get("SYNO_URL")
     else:
-        # 섹션 없이 루트에 있을 경우 대비
         SYNO_ID = st.secrets.get("SYNO_ID")
         SYNO_PW = st.secrets.get("SYNO_PW")
         SYNO_URL = st.secrets.get("SYNO_URL")
@@ -24,12 +22,8 @@ try:
     if SYNO_URL:
         SYNO_URL = SYNO_URL.rstrip('/')
 
-    # 필수 값 존재 여부 최종 확인
     if not all([SYNO_ID, SYNO_PW, SYNO_URL]):
         st.error("🚨 필수 값 누락!")
-        st.write("확인된 키 목록:", list(st.secrets.keys()))
-        if "credentials" in st.secrets:
-            st.write("credentials 내부 키:", list(st.secrets["credentials"].keys()))
         st.stop()
         
     st.success(f"✅ 설정 로드 성공: {SYNO_URL}")
@@ -41,18 +35,31 @@ if st.button("통신 테스트 시작"):
     session = requests.Session()
     
     try:
-        # 1단계: 로그인 시도 (DSM 7.2 대응을 위해 버전 6 시도)
-        st.subheader("1단계: 로그인 시도 (Version 6)")
+        # 0단계: API 정보 확인 (DSM 버전별 지원 확인)
+        st.subheader("0단계: API 정보 조회 (Info API)")
+        info_params = {
+            "api": "SYNO.API.Info",
+            "version": "1",
+            "method": "query",
+            "query": "SYNO.API.Auth,SYNO.FileStation.List"
+        }
+        info_res = session.get(f"{SYNO_URL}/webapi/query.cgi", params=info_params, timeout=10).json()
+        st.json(info_res)
+
+        # 1단계: 로그인 시도
+        st.subheader("1단계: 로그인 시도 (정밀 파라미터 적용)")
         start_time = time.time()
         
+        # DSM 7.2에서 가장 보편적인 파라미터 셋
         login_params = {
             "api": "SYNO.API.Auth",
-            "version": "6", # DSM 7.2 최적화 버전
+            "version": "6", 
             "method": "login",
             "account": SYNO_ID,
             "passwd": SYNO_PW,
             "session": "FileStation",
-            "format": "sid" 
+            "format": "sid",
+            "enable_device_token": "no" # DSM 7.x 보안 옵션
         }
         
         response = session.get(f"{SYNO_URL}/webapi/auth.cgi", params=login_params, timeout=10)
@@ -65,8 +72,8 @@ if st.button("통신 테스트 시작"):
             sid = res_data["data"]["sid"]
             st.success(f"로그인 성공! SID: {sid}")
             
-            # 2단계: 목록 조회 시도 (버전 2로 상향)
-            st.subheader("2단계: 목록 조회 시도 (Version 2)")
+            # 2단계: 목록 조회 시도
+            st.subheader("2단계: 목록 조회 시도")
             start_time = time.time()
             list_params = {
                 "api": "SYNO.FileStation.List",
@@ -80,15 +87,12 @@ if st.button("통신 테스트 시작"):
             st.json(list_res.json())
             
         else:
-            error_info = res_data.get("error", {})
-            error_code = error_info.get("code")
+            error_code = res_data.get("error", {}).get("code")
             st.error(f"로그인 실패 (에러 코드: {error_code})")
             
             if error_code == 400:
-                st.warning("⚠️ Version 6 거부됨. Version 3으로 재시도 중...")
-                login_params["version"] = "3"
-                retry_res = session.get(f"{SYNO_URL}/webapi/auth.cgi", params=login_params, timeout=10).json()
-                st.json(retry_res)
+                st.warning("⚠️ 파라미터 거부됨. 'passwd' 특수문자 인코딩 혹은 'api' 명칭 재점검이 필요함.")
+                st.info("Tip: 시놀로지 제어판 > 보안 > 계정에서 '2단계 인증'이 강제되어 있는지 확인 바람.")
             
     except Exception as e:
         st.error(f"🚨 네트워크 에러 발생: {e}")
