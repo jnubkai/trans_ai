@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage
 # 1. 페이지 설정
 st.set_page_config(layout="wide", page_title="AI 실시간 통역 시스템")
 
-# 디자인 커스텀 (unsafe_allow_html 오타 수정 완료)
+# 디자인 커스텀
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
@@ -22,13 +22,8 @@ try:
     SYNO_ID = CRED["SYNO_ID"]
     SYNO_PW = CRED["SYNO_PW"]
     
-    # URL 및 포트 설정 (사용자 요청 반영: 7651)
-    raw_url = CRED["SYNO_URL"].rstrip('/')
-    # 포트가 포함된 경우를 대비해 도메인/IP만 추출하거나 재구성
-    base_addr = raw_url.split("://")[-1].split(":")[0] 
-    
-    # HTTPS 전용 포트 7651 적용
-    SYNO_URL = f"https://{base_addr}:7651"
+    # 요청하신 주소 반영: speedep.synology.me:7651 (HTTPS)
+    SYNO_URL = "https://speedep.synology.me:7651"
         
     GOOGLE_API_KEY = CRED["GEMINI_KEY"]
     ASSEMBLY_KEY = CRED["ASSEMBLY_KEY"]
@@ -60,7 +55,7 @@ with st.sidebar:
     st.header("⚙️ 강의 환경 설정")
     
     # HTTPS 보안 경고 제어 옵션 (사설 인증서 사용 시 필수)
-    use_ssl_verify = st.checkbox("SSL 인증서 검증 활성화", value=False, help="iptime 사설 인증서 사용 시 체크 해제 권장.")
+    use_ssl_verify = st.checkbox("SSL 인증서 검증 활성화", value=False, help="synology.me 사설 인증서 사용 시 체크 해제 권장.")
     
     if st.button("📁 시놀로지 목록 업데이트", use_container_width=True):
         session = requests.Session()
@@ -112,7 +107,7 @@ with st.sidebar:
                     else:
                         st.error(f"목록 로드 실패 (코드: {list_res.get('error')})")
                 else:
-                    st.error("NAS 로그인 실패: 포트(7651) 및 HTTPS 설정을 확인하세요.")
+                    st.error(f"NAS 로그인 실패: 주소({SYNO_URL}) 또는 계정 정보를 확인하세요.")
         except requests.exceptions.SSLError:
             st.error("SSL 인증 오류: 'SSL 인증서 검증 활성화'를 해제하고 다시 시도하세요.")
         except Exception as e:
@@ -148,7 +143,7 @@ with col2:
 st.divider()
 c1, c2, c3 = st.columns([2, 1, 1])
 with c1:
-    st.caption(f"접속 프로토콜: HTTPS | 포트: 7651 | 서버: {SYNO_URL}")
+    st.caption(f"접속 주소: {SYNO_URL} | 계정: {SYNO_ID}")
 with c2:
     if st.button("▶️ 통역 시작", type="primary", use_container_width=True):
         if not st.session_state.get('sid'):
