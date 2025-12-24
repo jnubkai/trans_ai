@@ -3,8 +3,10 @@ import requests
 import os
 import json
 import asyncio
+import queue
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, AudioProcessorBase
 
 # 1. 페이지 설정
 st.set_page_config(layout="wide", page_title="AI 실시간 통역 시스템")
@@ -13,9 +15,9 @@ st.set_page_config(layout="wide", page_title="AI 실시간 통역 시스템")
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
-    .stInfo { font-size: 1.1rem; min-height: 250px; border-radius: 10px; padding: 15px; background-color: #e3f2fd; border-left: 5px solid #2196f3; }
-    .stSuccess { font-size: 1.1rem; min-height: 250px; border-radius: 10px; padding: 15px; background-color: #e8f5e9; border-left: 5px solid #4caf50; }
-    .transcript-box { height: 300px; overflow-y: auto; white-space: pre-wrap; }
+    .stInfo { font-size: 1.1rem; min-height: 300px; border-radius: 10px; padding: 15px; background-color: #e3f2fd; border-left: 5px solid #2196f3; }
+    .stSuccess { font-size: 1.1rem; min-height: 300px; border-radius: 10px; padding: 15px; background-color: #e8f5e9; border-left: 5px solid #4caf50; }
+    .transcript-box { height: 350px; overflow-y: auto; white-space: pre-wrap; border: 1px solid #ddd; padding: 10px; border-radius: 5px; background: white; font-family: 'Malgun Gothic', sans-serif; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -47,12 +49,10 @@ if 'folder_list' not in st.session_state:
     st.session_state['folder_list'] = []
 if 'sid' not in st.session_state:
     st.session_state['sid'] = None
-if 'is_translating' not in st.session_state:
-    st.session_state['is_translating'] = False
-if 'en_text' not in st.session_state:
-    st.session_state['en_text'] = ""
-if 'ko_text' not in st.session_state:
-    st.session_state['ko_text'] = ""
+if 'en_text_list' not in st.session_state:
+    st.session_state['en_text_list'] = []
+if 'ko_text_list' not in st.session_state:
+    st.session_state['ko_text_list'] = []
 
 st.title("🎤 RLRC 실시간 강의 통역 시스템")
 
@@ -69,13 +69,9 @@ with st.sidebar:
         })
         
         login_data = {
-            "api": "SYNO.API.Auth",
-            "version": "7",
-            "method": "login",
-            "account": SYNO_ID,
-            "passwd": SYNO_PW,
-            "session": "FileStation",
-            "format": "sid" 
+            "api": "SYNO.API.Auth", "version": "7", "method": "login",
+            "account": SYNO_ID, "passwd": SYNO_PW,
+            "session": "FileStation", "format": "sid" 
         }
         
         try:
@@ -85,17 +81,11 @@ with st.sidebar:
                 
                 if auth_res.get("success"):
                     st.session_state['sid'] = auth_res["data"]["sid"]
-                    
                     list_params = {
-                        "api": "SYNO.FileStation.List",
-                        "version": "2",
-                        "method": "list",
-                        "folder_path": "/RLRC/509 자료",
-                        "_sid": st.session_state['sid']
+                        "api": "SYNO.FileStation.List", "version": "2", "method": "list",
+                        "folder_path": "/RLRC/509 자료", "_sid": st.session_state['sid']
                     }
-                    
                     list_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=list_params, timeout=20, verify=use_ssl_verify).json()
-                    
                     if list_res.get("success"):
                         folders = [f['name'] for f in list_res['data']['files'] if f.get('isdir')]
                         st.session_state['folder_list'] = sorted(folders)
@@ -112,8 +102,8 @@ with st.sidebar:
     
     st.divider()
     if st.button("🧹 기록 모두 삭제", type="secondary", use_container_width=True):
-        st.session_state['en_text'] = ""
-        st.session_state['ko_text'] = ""
+        st.session_state['en_text_list'] = []
+        st.session_state['ko_text_list'] = []
         st.rerun()
 
 # 5. 실시간 통역 인터페이스
@@ -121,51 +111,68 @@ st.subheader(f"📍 진행 중인 강의: {selected_subject}")
 
 col1, col2 = st.columns(2)
 
+# 텍스트 합치기 도우미
+full_en = "\n\n".join(st.session_state['en_text_list'])
+full_ko = "\n\n".join(st.session_state['ko_text_list'])
+
 with col1:
     st.markdown("### 🇬🇧 English (Original)")
-    en_placeholder = st.empty()
-    en_placeholder.info(st.session_state['en_text'] if st.session_state['en_text'] else "강의자의 음성이 인식되면 여기에 표시됨.")
+    en_area = st.empty()
+    en_area.markdown(f'<div class="stInfo transcript-box">{full_en if full_en else "마이크를 켜면 음성 인식이 시작됨."}</div>', unsafe_allow_html=True)
 
 with col2:
     st.markdown("### 🇰🇷 한국어 (Translation)")
-    ko_placeholder = st.empty()
-    ko_placeholder.success(st.session_state['ko_text'] if st.session_state['ko_text'] else "실시간 번역 결과가 여기에 표시됨.")
+    ko_area = st.empty()
+    ko_area.markdown(f'<div class="stSuccess transcript-box">{full_ko if full_ko else "실시간 번역 결과가 여기에 표시됨."}</div>', unsafe_allow_html=True)
 
 # 6. 번역 로직 함수
 def translate_text(text):
     if not text.strip() or not llm:
         return ""
-    prompt = f"Translate the following lecture transcript into natural Korean. Maintain a formal and academic tone suitable for a university lecture. Text: {text}"
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return response.content
+    try:
+        prompt = f"Translate the following lecture transcript into natural Korean. Maintain a formal and academic tone. Text: {text}"
+        response = llm.invoke([HumanMessage(content=prompt)])
+        return response.content
+    except:
+        return "[번역 실패]"
 
-# 7. 하단 컨트롤 및 시뮬레이션 로직
+# 7. 오디오 처리 클래스
+# 실제 AssemblyAI 연동을 위한 결과 수신 큐(Queue) 준비
+result_queue = queue.Queue()
+
+class AudioProcessor(AudioProcessorBase):
+    def recv(self, frame):
+        # 마이크로부터 받은 오디오 프레임 처리 (향후 AssemblyAI 전송부 연결 지점)
+        return frame
+
+# 8. 실시간 마이크 입력 제어 버튼 (START/STOP)
 st.divider()
-c1, c2, c3 = st.columns([2, 1, 1])
-with c1:
-    st.caption(f"접속 상태: ✅ 정상 | 서버: {SYNO_URL}")
+st.write("### 🎙️ 통역 컨트롤 센터")
 
-with c2:
-    if not st.session_state['is_translating']:
-        if st.button("▶️ 통역 시작", type="primary", use_container_width=True):
-            if not st.session_state.get('sid'):
-                st.error("NAS 연결이 먼저 필요함.")
-            else:
-                st.session_state['is_translating'] = True
-                st.rerun()
-    else:
-        if st.button("⏹ 중지", type="secondary", use_container_width=True):
-            st.session_state['is_translating'] = False
-            st.rerun()
+# webrtc_streamer 자체가 시작/중지 버튼 역할을 수행함
+webrtc_ctx = webrtc_streamer(
+    key="speech-to-text",
+    mode=WebRtcMode.SENDONLY,
+    audio_processor_factory=AudioProcessor,
+    media_stream_constraints={"audio": True, "video": False},
+    async_processing=True,
+    # UI 한글화 및 버튼 가시성 설정
+    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+)
 
-# 8. 통역 루프 (임시 시뮬레이션 포함)
-if st.session_state['is_translating']:
-    # 실제 환경에서는 여기서 AssemblyAI WebSocket 연결 및 마이크 입력을 처리함
-    # 지금은 구조 확인을 위해 루프 형태만 구성함
-    with st.spinner("음성 인식 중..."):
-        # 데모용: 실제 구현 시에는 별도의 스레드나 비동기 루프로 대체
-        st.write("📢 마이크로부터 데이터를 기다리는 중 (실제 통역 로직 연결 대기)")
-        
-        # 임시 데이터 업데이트 예시 (동작 확인용)
-        # st.session_state['en_text'] += "\nHello, today we will talk about..."
-        # st.session_state['ko_text'] += f"\n{translate_text('Hello, today we will talk about...')}"
+if webrtc_ctx.state.playing:
+    st.success("🎤 통역 진행 중... 브라우저 상단의 'Stop'을 누르면 종료됨.")
+    
+    # [시뮬레이션/구현 로직 예시]
+    # 실제로는 AssemblyAI의 결과를 비동기로 받아와서 세션에 추가해야 함
+    # 임시 테스트: 결과가 감지되었다고 가정하고 화면 갱신
+    # new_en = "Testing real-time translation system."
+    # if new_en not in st.session_state['en_text_list']:
+    #     st.session_state['en_text_list'].append(new_en)
+    #     st.session_state['ko_text_list'].append(translate_text(new_en))
+    #     st.rerun()
+else:
+    st.warning("통역이 중지된 상태임. 위의 'START' 버튼을 눌러 마이크를 활성화해.")
+
+# 하단 정보
+st.caption(f"서버 연결 상태: ✅ 정상 | 접속 주소: {SYNO_URL}")
