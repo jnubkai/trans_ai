@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import base64
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.schema import HumanMessage
+from langchain_core.messages import HumanMessage
 
 # 1. 초기 설정 및 보안 정보 로드
 st.set_page_config(layout="wide", page_title="AI 실시간 특강 통역")
