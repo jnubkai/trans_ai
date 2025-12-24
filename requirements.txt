@@ -4,4 +4,5 @@ langchain
 langchain-core
 langchain-community
 langchain-google-genai
+langchain-openai
 assemblyai
