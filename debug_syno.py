@@ -7,26 +7,29 @@ st.set_page_config(page_title="시놀로지 접속 디버깅")
 
 st.title("🔍 시놀로지 접속 상세 디버깅 (DSM 7.2 대응)")
 
-# 1. Secrets 로드 로직
+# 1. Secrets 로드 로직 (사용자 제공 구조 반영)
 try:
-    full_secrets = dict(st.secrets)
-    def find_val(target_key):
-        if target_key in st.secrets:
-            return st.secrets[target_key]
-        for k, v in full_secrets.items():
-            if isinstance(v, dict) and target_key in v:
-                return v[target_key]
-        return None
-
-    SYNO_ID = find_val("SYNO_ID")
-    SYNO_PW = find_val("SYNO_PW")
-    SYNO_URL = find_val("SYNO_URL")
+    # [credentials] 섹션 직접 접근
+    if "credentials" in st.secrets:
+        CRED = st.secrets["credentials"]
+        SYNO_ID = CRED.get("SYNO_ID")
+        SYNO_PW = CRED.get("SYNO_PW")
+        SYNO_URL = CRED.get("SYNO_URL")
+    else:
+        # 섹션 없이 루트에 있을 경우 대비
+        SYNO_ID = st.secrets.get("SYNO_ID")
+        SYNO_PW = st.secrets.get("SYNO_PW")
+        SYNO_URL = st.secrets.get("SYNO_URL")
     
     if SYNO_URL:
         SYNO_URL = SYNO_URL.rstrip('/')
 
+    # 필수 값 존재 여부 최종 확인
     if not all([SYNO_ID, SYNO_PW, SYNO_URL]):
-        st.error("🚨 Secrets 필수 값 누락!")
+        st.error("🚨 필수 값 누락!")
+        st.write("확인된 키 목록:", list(st.secrets.keys()))
+        if "credentials" in st.secrets:
+            st.write("credentials 내부 키:", list(st.secrets["credentials"].keys()))
         st.stop()
         
     st.success(f"✅ 설정 로드 성공: {SYNO_URL}")
@@ -52,7 +55,6 @@ if st.button("통신 테스트 시작"):
             "format": "sid" 
         }
         
-        # DSM 7.2는 보안상 특정 헤더나 포맷에 엄격함
         response = session.get(f"{SYNO_URL}/webapi/auth.cgi", params=login_params, timeout=10)
         st.write(f"⏱️ 소요 시간: {time.time() - start_time:.2f}초")
         
@@ -82,7 +84,6 @@ if st.button("통신 테스트 시작"):
             error_code = error_info.get("code")
             st.error(f"로그인 실패 (에러 코드: {error_code})")
             
-            # DSM 7.x에서 400 에러 발생 시 시도할 대안 (버전 3으로 재시도)
             if error_code == 400:
                 st.warning("⚠️ Version 6 거부됨. Version 3으로 재시도 중...")
                 login_params["version"] = "3"
