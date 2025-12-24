@@ -7,3 +7,4 @@ langchain-google-genai
 langchain-openai
 assemblyai
 streamlit-webrtc
+websockets
