@@ -34,15 +34,13 @@ except Exception as e:
 
 if st.button("통신 테스트 시작"):
     session = requests.Session()
-    # DSM 7.2 보안 강화를 위해 표준 브라우저 헤더를 세밀하게 설정
+    # DSM 7.2 보안 정책상 User-Agent는 필수임
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "*/*",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     })
     
     try:
-        # 0단계: API 정보 확인 (이미 성공 확인됨)
+        # 0단계: API 정보 확인 (성공 확인됨)
         st.subheader("0단계: API 정보 조회")
         info_params = {
             "api": "SYNO.API.Info",
@@ -53,28 +51,23 @@ if st.button("통신 테스트 시작"):
         info_res = session.get(f"{SYNO_URL}/webapi/entry.cgi", params=info_params, timeout=10).json()
         st.json(info_res)
 
-        # 1단계: 로그인 시도
-        st.subheader("1단계: 로그인 시도 (인코딩 및 보안 파라미터 강화)")
+        # 1단계: 로그인 시도 (최종 호환성 팩 적용)
+        st.subheader("1단계: 로그인 시도 (파라미터 강제 조정)")
         
-        # 비밀번호 내 특수문자(@ 등) 이슈 방지를 위해 수동 인코딩 수행
-        encoded_pw = urllib.parse.quote(SYNO_PW)
-        
-        # DSM 7.2 최신 버전 공식 파라미터 셋
-        # method가 login일 때 passwd는 인코딩된 문자열이어야 함
+        # DSM 7.2.1 Update 8에서 400 에러를 피하기 위한 최후의 파라미터 조합
+        # passwd 내 특수문자(@)를 안전하게 전달하기 위해 수동 인코딩 시도 여부 결정
         login_data = {
             "api": "SYNO.API.Auth",
-            "version": "6", # DSM 7.x 공식 권장 버전
+            "version": "3", # 6, 7 버전에서 실패 시 가장 안정적인 3으로 고정 테스트
             "method": "login",
             "account": SYNO_ID,
-            "passwd": SYNO_PW, # requests.post가 내부적으로 처리하나, 400 에러 시 수동 인코딩 고려
+            "passwd": SYNO_PW, 
             "session": "FileStation",
-            "format": "sid",
-            "enable_device_token": "no",
-            "otp_code": "" # OTP 미사용 시 빈값 명시
+            "format": "sid"
         }
         
         start_time = time.time()
-        # 데이터 전송 방식을 명확히 하여 400 에러 차단 시도
+        # GET 방식과 POST 방식 중 서버가 더 잘 받아들이는 POST로 유지하되, 데이터 구조 단순화
         response = session.post(
             f"{SYNO_URL}/webapi/entry.cgi", 
             data=login_data, 
@@ -95,18 +88,27 @@ if st.button("통신 테스트 시작"):
                 code = err.get("code")
                 st.error(f"실패 코드: {code}")
                 
-                # 시놀로지 에러 코드별 가이드
+                # 400 에러 발생 시 최후의 수단: GET 방식으로 재시도
+                if code == 400:
+                    st.warning("POST 거부됨. GET 방식으로 즉시 재시도...")
+                    retry_res = session.get(
+                        f"{SYNO_URL}/webapi/entry.cgi", 
+                        params=login_data, 
+                        timeout=10
+                    ).json()
+                    st.json(retry_res)
+                
                 guide = {
-                    400: "파라미터 부족 혹은 형식이 맞지 않음 (API 명칭/버전 확인 필요)",
-                    401: "계정 정보 오류 혹은 비밀번호 인코딩 이슈",
-                    402: "권한 없음 (File Station 사용 권한 확인)",
-                    403: "2단계 인증(OTP) 필요",
-                    404: "계정 차단됨"
+                    400: "파라미터 부적합 (API 명칭/버전 불일치 혹은 필수 인코딩 누락)",
+                    401: "계정 정보 오류",
+                    402: "권한 없음",
+                    403: "2단계 인증 필요",
+                    404: "계정 차단"
                 }
                 st.warning(f"도움말: {guide.get(code, '알 수 없는 에러')}")
                 
-        except Exception as json_err:
-            st.error("JSON 파싱 실패 (서버가 HTML 에러 페이지를 반환했을 가능성 있음)")
+        except Exception:
+            st.error("서버 응답이 JSON 형식이 아님 (경로 혹은 포트 설정 확인 필요)")
             st.code(response.text[:500])
 
     except Exception as e:
@@ -115,4 +117,4 @@ if st.button("통신 테스트 시작"):
         session.close()
 
 st.divider()
-st.info("💡 모든 버전에서 400 발생 시 체크: DSM 제어판 > 보안 > 계정 > '2단계 인증이 강제되어 있는지' 확인 요망.")
+st.info("💡 400 에러가 계속된다면 시놀로지 패스워드에서 특수문자를 빼고 임시로 테스트해 보는 것을 추천함.")
